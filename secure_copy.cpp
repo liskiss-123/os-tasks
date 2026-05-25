@@ -1,196 +1,175 @@
 #include <iostream>
 #include <pthread.h>
-#include <signal.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <cstring>
-#include <fstream>
-#include <string>
+#include <vector>
+#include <queue>
 #include <time.h>
+#include <iomanip>
+#include <string>
+
+#define WORKERS_COUNT 4
 
 extern "C" {
     void set_key(char key);
     void caesar(void* src, void* dst, int len);
 }
 
-volatile sig_atomic_t keep_running = 1;
-
-void handle_sigint(int) {
-    keep_running = 0;
-}
-
-pthread_mutex_t log_mutex = PTHREAD_MUTEX_INITIALIZER;
-
-void log_event(const std::string& msg) {
+double get_time() {
     struct timespec ts;
-    clock_gettime(CLOCK_REALTIME, &ts);
-    ts.tv_sec += 1;
-
-    if (pthread_mutex_timedlock(&log_mutex, &ts) == 0) {
-        std::ofstream log_file("copy_log.txt", std::ios::app);
-        if (log_file.is_open()) {
-            log_file << msg << "\n";
-        }
-        pthread_mutex_unlock(&log_mutex);
-    } else {
-        std::cerr << "[Таймаут] Предотвращена взаимоблокировка при записи лога.\n";
-    }
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec + ts.tv_nsec / 1e9;
 }
 
-struct SharedData {
-    char buffer[8192];
-    ssize_t bytes_ready;
-    bool eof;
-    pthread_mutex_t mutex;
-    pthread_cond_t can_produce;
-    pthread_cond_t can_consume;
-
-    const char* in_file;
-    const char* out_file;
+struct Task {
+    std::string in_file;
+    std::string out_file;
+    double duration;
 };
 
-void* producer_func(void* arg) {
-    SharedData* data = (SharedData*)arg;
-    int fd = open(data->in_file, O_RDONLY);
+std::queue<Task*> task_queue;
+pthread_mutex_t queue_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+void process_file(Task* task) {
+    double start_time = get_time();
+
+    int fd_in = open(task->in_file.c_str(), O_RDONLY);
+    int fd_out = open(task->out_file.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
     
-    if (fd < 0) {
-        log_event("Ошибка открытия: " + std::string(data->in_file));
-        keep_running = 0; 
-        pthread_cond_signal(&data->can_consume);
-        return nullptr;
-    }
-
-    log_event("Начато чтение: " + std::string(data->in_file));
-
-    char local_buf[8192];
-    while (keep_running) {
-        ssize_t bytes_read = read(fd, local_buf, sizeof(local_buf));
-        if (bytes_read < 0) break;
-
-        if (bytes_read > 0) caesar(local_buf, local_buf, bytes_read);
-
-        pthread_mutex_lock(&data->mutex);
-        while (data->bytes_ready > 0 && keep_running) {
-            pthread_cond_wait(&data->can_produce, &data->mutex);
+    if (fd_in >= 0 && fd_out >= 0) {
+        char buffer[8192];
+        while (true) {
+            ssize_t bytes = read(fd_in, buffer, sizeof(buffer));
+            if (bytes <= 0) break;
+            
+            caesar(buffer, buffer, bytes);
+            
+            ssize_t w = write(fd_out, buffer, bytes);
+            (void)w;
         }
-
-        if (!keep_running) {
-            pthread_mutex_unlock(&data->mutex);
-            break;
-        }
-
-        memcpy(data->buffer, local_buf, bytes_read);
-        data->bytes_ready = bytes_read;
-        if (bytes_read == 0) data->eof = true;
-
-        pthread_cond_signal(&data->can_consume);
-        pthread_mutex_unlock(&data->mutex);
-
-        if (bytes_read == 0) break; 
     }
+    
+    if (fd_in >= 0) close(fd_in);
+    if (fd_out >= 0) close(fd_out);
 
-    close(fd);
-    log_event("Завершено чтение: " + std::string(data->in_file));
+    task->duration = get_time() - start_time;
+}
+
+void* worker_thread(void*) {
+    while (true) {
+        Task* my_task = nullptr;
+
+        pthread_mutex_lock(&queue_mutex);
+        if (!task_queue.empty()) {
+            my_task = task_queue.front();
+            task_queue.pop();
+        }
+        pthread_mutex_unlock(&queue_mutex);
+
+        if (my_task == nullptr) break;
+
+        process_file(my_task);
+    }
     return nullptr;
 }
 
-void* consumer_func(void* arg) {
-    SharedData* data = (SharedData*)arg;
-    int fd = open(data->out_file, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    
-    if (fd < 0) {
-        keep_running = 0;
-        pthread_cond_signal(&data->can_produce);
-        return nullptr;
+double run_parallel(std::vector<Task>& tasks) {
+    double start_total = get_time();
+
+    for (auto& task : tasks) {
+        task_queue.push(&task);
     }
 
-    while (keep_running) {
-        pthread_mutex_lock(&data->mutex);
-        while (data->bytes_ready == 0 && !data->eof && keep_running) {
-            pthread_cond_wait(&data->can_consume, &data->mutex);
-        }
+    pthread_t workers[WORKERS_COUNT];
+    int active_workers = std::min((int)tasks.size(), WORKERS_COUNT);
 
-        if (!keep_running && data->bytes_ready == 0) {
-            pthread_mutex_unlock(&data->mutex);
-            break;
-        }
-
-        ssize_t bytes_to_write = data->bytes_ready;
-        bool eof = data->eof;
-
-        if (bytes_to_write > 0) {
-            ssize_t w = write(fd, data->buffer, bytes_to_write);
-            (void)w; 
-        }
-
-        data->bytes_ready = 0; 
-        pthread_cond_signal(&data->can_produce); 
-        pthread_mutex_unlock(&data->mutex);
-
-        if (eof || !keep_running) break;
+    for (int i = 0; i < active_workers; i++) {
+        pthread_create(&workers[i], nullptr, worker_thread, nullptr);
     }
 
-    close(fd);
-    log_event("Завершена запись: " + std::string(data->out_file));
-    return nullptr;
+    for (int i = 0; i < active_workers; i++) {
+        pthread_join(workers[i], nullptr);
+    }
+
+    return get_time() - start_total;
+}
+
+double run_sequential(std::vector<Task>& tasks) {
+    double start_total = get_time();
+    for (auto& task : tasks) {
+        process_file(&task);
+    }
+    return get_time() - start_total;
+}
+
+void print_stats(const std::string& mode, double total_time, const std::vector<Task>& tasks) {
+    double sum_time = 0;
+    for (const auto& t : tasks) sum_time += t.duration;
+    double avg_time = sum_time / tasks.size();
+
+    std::cout << "\n=== Статистика (" << mode << ") ===\n";
+    std::cout << "Обработано файлов: " << tasks.size() << "\n";
+    std::cout << std::fixed << std::setprecision(4);
+    std::cout << "Общее время работы: " << total_time << " сек\n";
+    std::cout << "Среднее время на файл: " << avg_time << " сек\n";
+    std::cout << "=================================\n";
 }
 
 int main(int argc, char* argv[]) {
-    if (argc < 4 || argc % 2 != 0) {
-        std::cerr << "Использование: ./secure_copy <ключ> <вход1> <выход1> [<вход2> <выход2> ...]\n";
+    if (argc < 4) {
+        std::cerr << "Использование: ./secure_copy [--mode=sequential|parallel] <ключ> <in1> <out1> ...\n";
         return 1;
     }
 
-    struct sigaction sa;
-    sa.sa_handler = handle_sigint;
-    sigemptyset(&sa.sa_mask);
-    sa.sa_flags = 0;
-    sigaction(SIGINT, &sa, nullptr);
+    std::string mode = "auto";
+    int start_arg = 1;
 
-    set_key(argv[1][0]); 
+    if (std::string(argv[1]).find("--mode=") == 0) {
+        mode = std::string(argv[1]).substr(7);
+        start_arg = 2;
+    }
 
-    int num_files = (argc - 2) / 2;
-    
-    SharedData* shared = new SharedData[num_files];
-    pthread_t* producers = new pthread_t[num_files];
-    pthread_t* consumers = new pthread_t[num_files];
+    set_key(argv[start_arg][0]);
+    start_arg++;
 
-    log_event("=== Запуск. Обработка файлов: " + std::to_string(num_files) + " ===");
+    std::vector<Task> tasks;
+    for (int i = start_arg; i < argc; i += 2) {
+        if (i + 1 < argc) {
+            tasks.push_back({argv[i], argv[i+1], 0.0});
+        }
+    }
 
-    for (int i = 0; i < num_files; i++) {
-        shared[i].bytes_ready = 0;
-        shared[i].eof = false;
-        shared[i].in_file = argv[2 + i * 2];
-        shared[i].out_file = argv[3 + i * 2];
+    int file_count = tasks.size();
+
+    if (mode == "auto") {
+        std::cout << "Автоматический выбор режима. Количество файлов: " << file_count << ".\n";
         
-        pthread_mutex_init(&shared[i].mutex, nullptr);
-        pthread_cond_init(&shared[i].can_produce, nullptr);
-        pthread_cond_init(&shared[i].can_consume, nullptr);
-
-        pthread_create(&producers[i], nullptr, producer_func, &shared[i]);
-        pthread_create(&consumers[i], nullptr, consumer_func, &shared[i]);
+        if (file_count < 5) {
+            std::cout << "Эвристика: выбрана ПОСЛЕДОВАТЕЛЬНАЯ обработка (< 5 файлов).\n";
+            double t_seq = run_sequential(tasks);
+            print_stats("Sequential", t_seq, tasks);
+        } else {
+            std::cout << "Эвристика: выбрана ПАРАЛЛЕЛЬНАЯ обработка (>= 5 файлов).\n";
+            std::cout << "[Для сравнения запускаем оба режима...]\n";
+            
+            double t_seq = run_sequential(tasks);
+            double t_par = run_parallel(tasks);
+            
+            print_stats("Sequential (Альтернатива)", t_seq, tasks);
+            print_stats("Parallel (Выбрано)", t_par, tasks);
+            
+            std::cout << "\nРАЗНИЦА: Параллельный режим быстрее на " << (t_seq - t_par) << " сек!\n";
+        }
+    } 
+    else if (mode == "sequential") {
+        double t = run_sequential(tasks);
+        print_stats("Sequential", t, tasks);
+    } 
+    else if (mode == "parallel") {
+        double t = run_parallel(tasks);
+        print_stats("Parallel", t, tasks);
     }
 
-    for (int i = 0; i < num_files; i++) {
-        pthread_join(producers[i], nullptr);
-        pthread_join(consumers[i], nullptr);
-        
-        pthread_mutex_destroy(&shared[i].mutex);
-        pthread_cond_destroy(&shared[i].can_produce);
-        pthread_cond_destroy(&shared[i].can_consume);
-    }
-
-    delete[] shared;
-    delete[] producers;
-    delete[] consumers;
-
-    if (!keep_running) {
-        std::cout << "\nОперация прервана.\n";
-        log_event("=== Прерывание (Ctrl+C) ===");
-        return 130;
-    }
-
-    std::cout << "Успешно! Лог работы сохранен в copy_log.txt\n";
-    log_event("=== Завершено успешно ===");
     return 0;
 }
