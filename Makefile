@@ -17,13 +17,17 @@ install: $(LIB_NAME)
 	ldconfig
 
 test: all
-	@echo "Создаем тестовый файл 10 МБ..."
-	dd if=/dev/urandom of=input_10mb.bin bs=1M count=10
-	@echo "Шифруем 10 МБ через secure_copy..."
-	./$(APP_NAME) input_10mb.bin encrypted_10mb.bin K
+	@echo "Очищаем старые логи..."
+	rm -f copy_log.txt
+	@echo "Создаем два тестовых файла..."
+	@echo "Первый файл" > file1.txt
+	@echo "Второй файл" > file2.txt
+	@echo "Запускаем многопоточную обработку..."
+	./$(APP_NAME) K file1.txt out1.bin file2.txt out2.bin
 	@echo "Дешифруем обратно..."
-	./$(APP_NAME) encrypted_10mb.bin decrypted_10mb.bin K
-	@echo "Проверка завершена. Если ошибок нет, файлы идентичны."
+	./$(APP_NAME) K out1.bin dec1.txt out2.bin dec2.txt
+	@echo "Смотрим лог-файл (copy_log.txt):"
+	cat copy_log.txt
 
 clean:
-	rm -f $(LIB_NAME) $(APP_NAME) input.txt encrypted.bin decrypted.txt input_10mb.bin encrypted_10mb.bin decrypted_10mb.bin
+	rm -f $(LIB_NAME) $(APP_NAME) *.txt *.bin copy_log.txt
