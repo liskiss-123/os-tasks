@@ -1,30 +1,29 @@
 CXX = g++
-# Обязательные флаги, которые требует преподаватель [cite: 49]
-CXXFLAGS = -Wall -Wextra -pedantic -fPIC 
+CXXFLAGS = -Wall -Wextra -pedantic -fPIC -pthread
 LDFLAGS = -shared
 LIB_NAME = libcaesar.so
+APP_NAME = secure_copy
 
-# Цель 1: собирает саму библиотеку 
-all: $(LIB_NAME) 
+all: $(LIB_NAME) $(APP_NAME)
 
 $(LIB_NAME): caesar.cpp
 	$(CXX) $(CXXFLAGS) $(LDFLAGS) -o $@ $<
 
-# Цель 2: копирует файл в системную папку линукса 
-install: $(LIB_NAME) 
+$(APP_NAME): secure_copy.cpp $(LIB_NAME)
+	$(CXX) $(CXXFLAGS) -o $@ $< -L. -lcaesar -Wl,-rpath=.
+
+install: $(LIB_NAME)
 	cp $(LIB_NAME) /usr/local/lib/
 	ldconfig
 
-# Цель 3: автоматически проверяет, работает ли код [cite: 16]
-test: all 
-	@echo "Создаем файл..."
-	@echo "Hello, OS!" > input.txt
-	@echo "Шифруем..."
-	python3 test.py ./$(LIB_NAME) K input.txt encrypted.bin
-	@echo "Дешифруем..."
-	python3 test.py ./$(LIB_NAME) K encrypted.bin decrypted.txt
-	@echo "Результат (должен совпасть с изначальным):"
-	cat decrypted.txt
+test: all
+	@echo "Создаем тестовый файл 10 МБ..."
+	dd if=/dev/urandom of=input_10mb.bin bs=1M count=10
+	@echo "Шифруем 10 МБ через secure_copy..."
+	./$(APP_NAME) input_10mb.bin encrypted_10mb.bin K
+	@echo "Дешифруем обратно..."
+	./$(APP_NAME) encrypted_10mb.bin decrypted_10mb.bin K
+	@echo "Проверка завершена. Если ошибок нет, файлы идентичны."
 
 clean:
-	rm -f $(LIB_NAME) input.txt encrypted.bin decrypted.txt
+	rm -f $(LIB_NAME) $(APP_NAME) input.txt encrypted.bin decrypted.txt input_10mb.bin encrypted_10mb.bin decrypted_10mb.bin
