@@ -1,33 +1,21 @@
 CXX = g++
-CXXFLAGS = -Wall -Wextra -pedantic -fPIC -pthread
-LDFLAGS = -shared
-LIB_NAME = libcaesar.so
+CXXFLAGS = -Wall -Wextra -pedantic -pthread -std=c++17
 APP_NAME = secure_copy
 
-all: $(LIB_NAME) $(APP_NAME)
+all: $(APP_NAME)
 
-$(LIB_NAME): caesar.cpp
-	$(CXX) $(CXXFLAGS) $(LDFLAGS) -o $@ $<
+$(APP_NAME): secure_copy.cpp
+	$(CXX) $(CXXFLAGS) -o $@ $<
 
-$(APP_NAME): secure_copy.cpp $(LIB_NAME)
-	$(CXX) $(CXXFLAGS) -o $@ $< -L. -lcaesar -Wl,-rpath=.
-
-install: $(LIB_NAME)
-	cp $(LIB_NAME) /usr/local/lib/
-	ldconfig
-
-test: all
-	@echo "Очищаем старые логи..."
-	rm -f copy_log.txt
-	@echo "Создаем два тестовых файла..."
-	@echo "Первый файл" > file1.txt
-	@echo "Второй файл" > file2.txt
-	@echo "Запускаем многопоточную обработку..."
-	./$(APP_NAME) K file1.txt out1.bin file2.txt out2.bin
-	@echo "Дешифруем обратно..."
-	./$(APP_NAME) K out1.bin dec1.txt out2.bin dec2.txt
-	@echo "Смотрим лог-файл (copy_log.txt):"
-	cat copy_log.txt
+test: $(APP_NAME)
+	@rm -rf test_dir disk.img result.txt
+	@mkdir -p test_dir/sub_dir
+	@echo "Secret1" > test_dir/file1.txt
+	@echo "Secret2" > test_dir/sub_dir/file2.txt
+	./$(APP_NAME) -add -key "mykey" -image disk.img test_dir/
+	./$(APP_NAME) -list -image disk.img
+	./$(APP_NAME) -get -image disk.img -key "mykey" -out result.txt test_dir/sub_dir/file2.txt
+	@cat result.txt
 
 clean:
-	rm -f $(LIB_NAME) $(APP_NAME) *.txt *.bin copy_log.txt
+	rm -rf $(APP_NAME) test_dir disk.img result.txt
